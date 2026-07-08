@@ -362,6 +362,34 @@ pip install -e .
 
 ---
 
+## ▶️ Starting and Stopping the Server
+
+**Start:**
+
+```bash
+# Using the helper script (auto-detects venv, generates SSL certs, checks port 8090)
+./scripts/start_server.sh
+
+# Or run directly with custom flags (e.g. YOLO-triggered mode, a specific VLM backend)
+live-vlm-webui --api-base http://localhost:8000/v1 --model qwen2.5-vl-7b \
+  --trigger-mode yolo --yolo-model yolo11n-seg.pt
+```
+
+**Stop:**
+
+```bash
+live-vlm-webui-stop
+# equivalently:
+./scripts/stop_server.sh
+```
+
+Both find and gracefully terminate the running server process (falling back to a force-kill if it hasn't exited after a couple seconds) - no need to manually `pkill` or hunt down the PID.
+
+> [!NOTE]
+> If you're running the Docker Compose stack instead, stop it with `docker compose down` (or `docker stop live-vlm-webui`) - `live-vlm-webui-stop` only manages locally/pip-run instances.
+
+---
+
 ## 🤖 Setting Up Your VLM Backend
 
 Choose the VLM backend that fits your needs:

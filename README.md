@@ -190,6 +190,13 @@ live-vlm-webui
 
 Once the server is running, access the web interface at **`https://localhost:8090`**
 
+> [!TIP]
+> **`localhost`/`127.0.0.1` vs. the machine's network IP (e.g. `https://10.31.176.206:8090`) - which to use?**
+> - **Browsing on a separate laptop/PC over the LAN** (recommended - better browser performance, real webcam access): use the **network IP**, found in the server's startup log (`Network: https://...`) or via `hostname -I`.
+> - **Browsing directly on the server's own display**: `localhost`/`127.0.0.1` works fine.
+> - **Reaching it through an SSH tunnel** (`ssh -L 8090:localhost:8090 ...`) **from a remote machine**: the page loads and even requests camera permission, but the video will silently fail to appear. WebRTC needs direct UDP connectivity, which an SSH tunnel (TCP-only) can't provide. Use the network IP directly instead, or X11-forward a browser (`ssh -X`).
+> - Either way, the self-signed cert is only issued for `CN=localhost` with no Subject Alternative Names, so **every URL - including the network IP - triggers the same browser security warning**. That's expected; click through it (see below).
+
 ### Accepting the SSL Certificate
 
 | 1️⃣ Click **"Advanced"** button | 2️⃣ Click **"Proceed to localhost (unsafe)"** | 3️⃣ Allow camera access when prompted |
@@ -252,6 +259,64 @@ Once the server is running, access the web interface at **`https://localhost:809
 
 ---
 
+## 🎯 YOLO-Triggered VLM Mode (Local Addition)
+
+> [!NOTE]
+> This section documents local customizations on top of the upstream project (added for a DGX Spark Live VLM WebUI exercise). They are not part of the upstream NVIDIA-AI-IOT repository.
+
+Instead of sending every Nth frame to the VLM on a fixed interval, this fork can run a lightweight **YOLO11n** object detector on the video stream and only fire the (expensive) VLM call when the set of detected object classes actually changes - e.g. a person walks into frame, or an object disappears.
+
+```bash
+# Install the optional YOLO dependency once
+pip install -e ".[yolo]"
+
+# Run with YOLO-triggered VLM calls instead of a fixed frame interval
+live-vlm-webui --model qwen2.5-vl-7b --api-base http://localhost:8000/v1 \
+  --trigger-mode yolo \
+  --yolo-model yolo11n.pt \
+  --yolo-conf 0.4 \
+  --yolo-classes person,car,dog \
+  --yolo-detect-every 5 \
+  --yolo-cooldown 2.0
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--trigger-mode` | `interval` | `interval` (fixed frame count, default) or `yolo` (change-triggered) |
+| `--yolo-model` | `yolo11n.pt` | Path or name of the YOLO model (auto-downloaded by `ultralytics` on first use) |
+| `--yolo-conf` | `0.4` | Confidence threshold for YOLO detections |
+| `--yolo-classes` | *(any)* | Comma-separated COCO class allowlist, e.g. `person,car,dog` |
+| `--yolo-detect-every` | `5` | Run YOLO detection every Nth frame |
+| `--yolo-cooldown` | `2.0` | Minimum seconds between VLM triggers |
+
+**Why this exists:** running the VLM on every frame (or every few seconds regardless of scene content) burns compute re-describing a static scene. YOLO11n is orders of magnitude cheaper than a VLM call, so it can watch continuously and only wake the VLM up when something actually changed.
+
+**GPU contention:** YOLO detection and VLM inference share the same GPU. This fork automatically pauses YOLO detection while a VLM call is in flight, so the two workloads don't fragment/stall each other.
+
+### UI additions in this mode
+- **VLM processing ring** - circular indicator next to the metrics showing whether the VLM is currently processing (fill estimated from elapsed time vs. average latency)
+- **Trigger status chips** - live tag pills showing what YOLO currently sees, flashing gold the instant a change fires the VLM
+- **Result thumbnail + history log** - every VLM result keeps a small snapshot of the exact frame that produced it, plus a scrollable "Recent Results" log (last 20 results: thumbnail + text + timestamp) inside the VLM Output Info card
+
+### Why vLLM instead of Ollama on DGX Spark (GB10)
+
+> [!WARNING]
+> On this DGX Spark (NVIDIA GB10, Blackwell), Ollama forces the vision encoder (CLIP/mmproj) onto **CPU** for every image request, regardless of model - confirmed by tracing Ollama's own source (`llm/llama_server.go`, `shouldDisableMMProjOffload`): it classifies GB10 as an `Integrated` (unified-memory) GPU and has a hardcoded rule disabling mmproj GPU-offload for any integrated GPU except Apple Metal. Result: ~30-40s per image with `gemma3:4b` via Ollama, vs. **~0.6-0.7s per image** with the same hardware via vLLM (confirmed both via this app and plain `ollama run`/`curl` directly against each backend). This isn't fixable via Ollama env vars, cache flushing, or kernel module reloads - all tested and ruled out. See [Setting Up Your VLM Backend](#-setting-up-your-vlm-backend) for the vLLM setup this fork defaults to.
+
+Auto-detection (and the CLI examples above) now prefer **vLLM on `:8000`** over Ollama when both are reachable - see the reordered service list in `detect_local_service_and_model()`/`detect_services()` in `server.py`.
+
+### Automatic Ollama lifecycle
+If no `--api-base` is given, this fork will:
+1. Check whether **vLLM** is already reachable on `localhost:8000` - if so, prefer it and skip Ollama entirely
+2. Otherwise, check whether Ollama is already reachable on `localhost:11434`
+3. If neither is up, spawn `ollama serve` itself and wait for it to come up
+4. Warm the model up in the background at startup (so the first real request isn't a cold start)
+5. Terminate the Ollama process it started when `live-vlm-webui` shuts down (`Ctrl+C` or `live-vlm-webui-stop`)
+
+If Ollama is already running (e.g. as a systemd service), this fork detects that and leaves it alone - it only manages instances it started itself. It never starts or stops vLLM itself (that's managed separately, e.g. via Docker Compose).
+
+---
+
 ## 💻 Development Installation (From Source)
 
 **For developers, contributors, and those who want full control:**
@@ -306,7 +371,7 @@ Choose the VLM backend that fits your needs:
 | Backend | Setup Difficulty | Model Coverage | GPU Required |
 |---------|------------------|----------------|--------------|
 | **Ollama** ✅    | 🟢 Easy   | 14+ vision models ([link](https://ollama.com/search?c=vision)) | 🏠 Yes (local) |
-| **vLLM** ⚠️      | 🔴 Varies (works best on PC) | Widest HF model support | 🏠 Yes (local) |
+| **vLLM** ✅      | 🟡 Medium (Docker Compose profile provided) | Widest HF model support | 🏠 Yes (local) - **Recommended on DGX Spark** |
 | **NVIDIA NIM** ⚠️ | 🟡 Medium | Limited VLM selection (improving) | 🏠 Yes (local) |
 | **NVIDIA API Catalog** ✅ | 🟢 Easy | 12+ hosted VLMs     | ☁️ No (cloud) |
 | **OpenAI API** ⚠️        | 🟢 Easy | GPT-4o, GPT-4o-mini | ☁️ No (cloud) |
@@ -326,8 +391,16 @@ ollama serve
 
 **Best for:** Quick start, easy model management
 
-### Option B: vLLM (Recommended for Performance)
+### Option B: vLLM (Recommended for Performance - Recommended on DGX Spark)
 
+**Easiest (Docker Compose, tested on DGX Spark GB10):**
+```bash
+export HF_TOKEN=<your-huggingface-token>
+docker compose --profile vllm-backend up -d
+```
+See [Docker Compose (Complete Stack with VLM Backend)](#with-vllm-recommended-on-dgx-spark---local-addition) above for the full-stack option and details.
+
+**Manual (pip, other platforms/models):**
 ```bash
 # Install vLLM
 pip install vllm
@@ -338,7 +411,7 @@ python -m vllm.entrypoints.openai.api_server \
   --port 8000
 ```
 
-**Best for:** Production deployments, high throughput
+**Best for:** Production deployments, high throughput. On DGX Spark specifically, this isn't just "better performance" - it's the difference between ~0.6-0.7s and ~30-40s per image, since Ollama can't use the GPU for the vision encoder on this hardware. See [Why vLLM instead of Ollama on DGX Spark](#why-vllm-instead-of-ollama-on-dgx-spark-gb10).
 
 ### Option C: NVIDIA API Catalog (No GPU Required)
 
@@ -435,12 +508,39 @@ docker exec ollama ollama pull llama3.2-vision:11b
 ```
 
 > [!TIP]
-> Backend-centric profiles make it easy: `--profile ollama`, `--profile vllm` (future), etc.
+> Backend-centric profiles make it easy: `--profile ollama`, `--profile vllm-backend`, `--profile vllm-full-stack`, `--profile nim`, etc.
 
 Includes:
 - ✅ Ollama for easy model management
 - ✅ Live VLM WebUI for real-time interaction
 - ✅ No API keys required
+
+### With vLLM (Recommended on DGX Spark - Local Addition)
+
+> [!NOTE]
+> This profile is a local addition, not part of the upstream project. On DGX Spark (GB10), Ollama forces the vision encoder onto CPU (~30-40s/image) - vLLM uses the GPU correctly (~0.6-0.7s/image). See [Why vLLM instead of Ollama on DGX Spark](#why-vllm-instead-of-ollama-on-dgx-spark-gb10) for the full story.
+
+There are two profiles, depending on whether you want the stock web UI or this repo's customized version (YOLO trigger mode, VLM processing ring, thumbnail/history log, etc.):
+
+**Backend only** (pairs with this repo's own customized `live-vlm-webui`, run separately via `pip install -e .`):
+```bash
+export HF_TOKEN=<your-huggingface-token>
+docker compose --profile vllm-backend up -d
+
+# In another terminal, run the customized version from source:
+live-vlm-webui --api-base http://localhost:8000/v1 --model qwen2.5-vl-7b --trigger-mode yolo
+```
+
+**Full stack** (vLLM + stock upstream web UI, one command, simplest but without the local customizations):
+```bash
+export HF_TOKEN=<your-huggingface-token>
+docker compose --profile vllm-full-stack up -d
+```
+
+Includes:
+- ✅ vLLM serving `Qwen/Qwen2.5-VL-7B-Instruct-AWQ` on `:8000`
+- ✅ Correct GPU usage for the vision encoder on DGX Spark (unlike Ollama)
+- ⚠️ Needs a [HuggingFace token](https://huggingface.co/settings/tokens) (`HF_TOKEN`) for model download
 
 ### With NVIDIA NIM + Cosmos-Reason1-7B (Advanced)
 
@@ -512,6 +612,9 @@ Includes:
 - ⏱️ **Inference metrics** - Live latency tracking (last, average, total count)
 - 🪞 **Video mirroring** - Toggle button overlay on camera view
 - 📱 **Compact layout** - Single-screen design
+- 🎯 **YOLO-triggered VLM mode** *(local addition)* - Fire the VLM only when detected objects change, instead of a fixed frame interval - see [YOLO-Triggered VLM Mode](#-yolo-triggered-vlm-mode-local-addition)
+- ⭕ **VLM processing ring + result history log** *(local addition)* - Circular busy indicator, plus a scrollable log of the last 20 results with thumbnail + timestamp
+- 🔄 **Self-managed Ollama lifecycle** *(local addition)* - Prefers vLLM if already running; otherwise auto-starts Ollama and warms the model up on launch, terminates it on shutdown
 
 ### Platform Support
 - 💻 **Cross-platform monitoring** - Auto-detects NVIDIA GPUs (NVML), Apple Silicon
@@ -542,6 +645,9 @@ Includes:
 **Camera not accessible?**
 - Use HTTPS (not HTTP): `./scripts/start_server.sh` or `--ssl-cert cert.pem --ssl-key key.pem`
 - Accept the self-signed certificate warning (Advanced → Proceed)
+
+**Camera preview works, permission granted, but no video/VLM output appears?**
+- If you're reaching the server through an SSH tunnel (`ssh -L 8090:localhost:8090 ...`), this is expected - WebRTC needs direct UDP connectivity that a TCP-only SSH tunnel can't carry. Access the server's network IP directly from a browser on the same LAN instead (see [WebUI Usage](#-webui-usage) for `localhost` vs. network IP).
 
 **Can't connect to VLM?**
 - Check VLM is running: `curl http://localhost:8000/v1/models` (vLLM) or `curl http://localhost:11434/v1/models` (Ollama)
@@ -595,6 +701,7 @@ live-vlm-webui/
 │       ├── video_processor.py # Video frame processing and VLM integration
 │       ├── gpu_monitor.py    # Cross-platform GPU/system monitoring
 │       ├── vlm_service.py    # VLM API integration
+│       ├── yolo_trigger.py   # YOLO11n change-detection trigger (local addition)
 │       └── static/
 │           └── index.html    # Frontend web UI
 │

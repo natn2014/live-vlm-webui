@@ -59,6 +59,8 @@ class VLMService:
         self.max_tokens = max_tokens
         self.client = AsyncOpenAI(base_url=api_base, api_key=api_key)
         self.current_response = "Initializing..."
+        self.current_thumbnail: Optional[str] = None  # data URL of the frame that produced current_response
+        self.current_result_ts: Optional[float] = None
         self.is_processing = False
         self._processing_lock = asyncio.Lock()
         self._last_request_payload = None  # For debug: request body (image truncated)
@@ -127,6 +129,9 @@ class VLMService:
             }
 
             # Call API
+            # Note: Ollama's OpenAI-compatible endpoint ignores a per-request
+            # "keep_alive" field - that has to be set via OLLAMA_KEEP_ALIVE on
+            # the ollama service itself instead.
             response = await self.client.chat.completions.create(
                 model=self.model, messages=messages, max_tokens=self.max_tokens, temperature=0.7
             )
@@ -185,7 +190,12 @@ class VLMService:
         """
         return self._last_response_payload
 
-    async def process_frame(self, image: Image.Image, prompt: Optional[str] = None) -> None:
+    async def process_frame(
+        self,
+        image: Image.Image,
+        prompt: Optional[str] = None,
+        thumbnail_b64: Optional[str] = None,
+    ) -> None:
         """
         Process a frame asynchronously. Updates self.current_response when done.
         If already processing, this call is skipped.
@@ -193,6 +203,9 @@ class VLMService:
         Args:
             image: PIL Image to process
             prompt: Optional custom prompt (uses default if None)
+            thumbnail_b64: Optional data-URL thumbnail of this exact frame, stored
+                alongside the response so the UI can pair each result with the
+                image that produced it (for the result history log)
         """
         # Non-blocking check if we're already processing
         if self._processing_lock.locked():
@@ -204,8 +217,18 @@ class VLMService:
             try:
                 response = await self.analyze_image(image, prompt)
                 self.current_response = response
+                self.current_thumbnail = thumbnail_b64
+                self.current_result_ts = time.time()
             finally:
                 self.is_processing = False
+
+    def get_current_thumbnail(self) -> Optional[str]:
+        """Return the thumbnail (data URL) paired with the current response, if any."""
+        return self.current_thumbnail
+
+    def get_current_result_ts(self) -> Optional[float]:
+        """Return the unix timestamp the current response was produced, if any."""
+        return self.current_result_ts
 
     def get_current_response(self) -> tuple[str, bool]:
         """

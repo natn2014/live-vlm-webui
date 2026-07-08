@@ -1165,6 +1165,14 @@ limitations under the License.
             margin-bottom: 16px;
         }
 
+        /* Keeps result-header + trigger-status-row pinned in place; everything
+           below (prompt, result, history log, debug blocks) scrolls within this. */
+        .result-scroll-area {
+            max-height: 520px;
+            overflow-y: auto;
+            padding-right: 4px;
+        }
+
         .result-header-left {
             flex: 1;
         }
@@ -1214,11 +1222,103 @@ limitations under the License.
             max-width: 90%;
             word-wrap: break-word;
             position: relative; /* For absolute positioning of button */
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
         }
 
         .result-text-content {
             /* Content wrapper - this is what gets updated, not the parent */
-            width: 100%;
+            flex: 1;
+            min-width: 0;
+        }
+
+        .result-thumbnail {
+            display: none;
+            flex-shrink: 0;
+            width: 96px;
+            height: 72px;
+            object-fit: cover;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+        }
+
+        /* VLM Result History (nested section within the VLM Output Info card) */
+        .vlm-history-section {
+            margin-top: 20px;
+            padding-top: 16px;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .vlm-history-section .result-header {
+            margin-bottom: 12px;
+        }
+
+        .history-clear-btn {
+            background: transparent;
+            border: 1px solid var(--border-color);
+            color: var(--text-secondary);
+            padding: 6px 8px;
+            border-radius: 6px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            transition: all 0.2s;
+        }
+
+        .history-clear-btn:hover {
+            background: var(--hover-bg);
+            border-color: var(--accent-color);
+            color: var(--accent-color);
+        }
+
+        .history-clear-btn .lucide {
+            width: 14px;
+            height: 14px;
+        }
+
+        .vlm-history-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            /* No own scroll/max-height - it scrolls as part of .result-scroll-area */
+        }
+
+        .vlm-history-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            background: var(--bg-secondary);
+        }
+
+        .vlm-history-thumb {
+            width: 56px;
+            height: 42px;
+            object-fit: cover;
+            border-radius: 6px;
+            flex-shrink: 0;
+        }
+
+        .vlm-history-text {
+            flex: 1;
+            font-size: 12px;
+            color: var(--text-primary);
+            line-height: 1.4;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+        }
+
+        .vlm-history-ts {
+            font-size: 11px;
+            color: var(--text-secondary);
+            white-space: nowrap;
+            flex-shrink: 0;
         }
 
         /* Embedded markdown toggle button */
@@ -1506,6 +1606,88 @@ limitations under the License.
         .metric-value {
             font-weight: 600;
             color: var(--accent-color);
+        }
+
+        /* VLM circular processing ring */
+        .vlm-ring-wrap {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .vlm-ring-svg {
+            transform: rotate(-90deg);
+        }
+
+        .vlm-ring-track {
+            fill: none;
+            stroke: var(--border-color);
+            stroke-width: 3;
+        }
+
+        .vlm-ring-fill {
+            fill: none;
+            stroke: var(--accent-color);
+            stroke-width: 3;
+            stroke-linecap: round;
+            transition: stroke-dashoffset 0.15s linear, stroke 0.2s ease;
+        }
+
+        .vlm-ring-wrap.idle .vlm-ring-fill {
+            stroke: var(--border-color);
+        }
+
+        .vlm-ring-wrap.spin .vlm-ring-svg {
+            animation: vlmRingSpin 1s linear infinite;
+        }
+
+        @keyframes vlmRingSpin {
+            100% { transform: rotate(270deg); }
+        }
+
+        .vlm-ring-label {
+            font-size: 11px;
+            color: var(--text-secondary);
+            white-space: nowrap;
+        }
+
+        /* YOLO trigger status */
+        .trigger-status-row {
+            display: none;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 0 0;
+            flex-wrap: wrap;
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        .trigger-chips {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+
+        .trigger-chip {
+            padding: 2px 10px;
+            border-radius: 999px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            color: var(--text-secondary);
+            font-size: 11px;
+            transition: background 0.6s ease, border-color 0.6s ease, color 0.6s ease;
+        }
+
+        .trigger-chip.empty {
+            font-style: italic;
+            opacity: 0.7;
+        }
+
+        .trigger-chips.flash .trigger-chip {
+            background: rgba(118, 185, 71, 0.35);
+            border-color: var(--accent-color);
+            color: var(--accent-color);
+            transition: none;
         }
 
         /* System Stats */
@@ -1992,19 +2174,7 @@ limitations under the License.
     <div class="header">
         <div class="header-left">
             <div class="logo">
-                <svg xmlns="http://www.w3.org/2000/svg"
-                     width="42"
-                     height="42"
-                     viewBox="0 0 1024 1024"
-                     fill="none"
-                     style="color: var(--accent-color);">
-                    <!-- All parts become accent color (NVIDIA green) -->
-                    <path fill="currentColor" d="M1024 727.183 511.134 1024 0 729.493V601.5l511.134 296L1024 601.5z"/>
-
-                    <path fill="currentColor" d="M968.916 53.23c20.567-11.874 37.244-2.248 37.244 21.5v452.571c0 23.748-16.678 52.625-37.244 64.5L568.653 822.893c-20.566 11.874-37.239 2.248-37.239-21.5V348.821c0-23.748 16.673-52.626 37.239-64.5zM592 407.121v304.172c0 18.777 13.183 26.389 29.445 17l303.11-175.001c16.262-9.389 29.445-32.222 29.445-51V198.12zm35-89.894c0-15.037-10.745-21.023-24-13.371-13.255 7.653-24 26.046-24 41.083s10.745 21.024 24 13.371c13.255-7.652 24-26.046 24-41.083M427.702 479.5v337L25 584V247zM216.603 440C168.773 412.386 130 434.772 130 490s38.773 122.386 86.603 150 86.602 5.228 86.602-50-38.773-122.386-86.602-150m146.855 44.544c-12.955-7.48-23.458-1.417-23.458 13.543s10.503 33.151 23.458 40.631 23.458 1.415 23.458-13.544c0-14.96-10.503-33.15-23.458-40.63"/>
-
-                    <path fill="currentColor" d="m455.5 464-403-233.5 38.5-21 404.5 232V778l-40 24.5zM501.5 363.5v40L128.644 191.366 166 169.799zM513.5 298c-6.5 9-9 15.5-12 25.5L198 153l31-17zM931 519.064 715 643.772v-88.949l20.784-11.999v64.948l174.431-100.708v-64.967c8.419-5.181 15.888-14.149 20.785-24.097zM895.288 276.814c15.305-8.836 27.713-1.673 27.713 16v80c0 17.673-12.408 39.164-27.713 48L654.713 559.71c-15.306 8.837-27.713 1.674-27.713-16v-80c0-17.673 12.407-39.163 27.713-48zM663.882 457.792v31.943l158.18-91.325v-31.943z"/>
-                </svg>
+                <img src="/images/AGC_Logo.svg" height="42" style="width: auto; display: block;" alt="AGC logo">
             </div>
             <div class="title-section">
                 <h1>Live VLM WebUI</h1>
@@ -2435,6 +2605,14 @@ After commands, explain: obstacles detected, clearance margins, goal inference, 
                         </div>
                     </div>
                     <div style="display: flex; align-items: center; gap: 16px;">
+                        <div class="vlm-ring-wrap idle" id="vlmRingWrap" title="VLM processing status">
+                            <svg class="vlm-ring-svg" width="28" height="28" viewBox="0 0 40 40">
+                                <circle class="vlm-ring-track" cx="20" cy="20" r="16"></circle>
+                                <circle class="vlm-ring-fill" id="vlmRingFill" cx="20" cy="20" r="16"
+                                    stroke-dasharray="100.53" stroke-dashoffset="100.53"></circle>
+                            </svg>
+                            <span class="vlm-ring-label" id="vlmRingLabel">Idle</span>
+                        </div>
                         <div class="metrics-inline" id="metricsInline" style="display: none;">
                             <div class="metric-item">
                                 <span>Latency:</span>
@@ -2454,28 +2632,54 @@ After commands, explain: obstacles detected, clearance margins, goal inference, 
                     </div>
             </div>
 
-                <div class="result-prompt" id="currentPrompt"></div>
-                <div id="requestPayloadDebug" class="debug-payload-block" style="display: none; margin-top: 8px;">
-                    <details style="margin: 0;">
-                        <summary style="cursor: pointer; font-size: 12px; color: var(--text-secondary);">Request payload (debug)</summary>
-                        <pre id="requestPayloadContent" style="margin: 8px 0 0; padding: 10px; background: var(--bg-secondary); border-radius: 8px; font-size: 11px; overflow: auto; max-height: 240px; white-space: pre-wrap; word-break: break-all;"></pre>
-                    </details>
+                <div class="trigger-status-row" id="triggerStatusRow">
+                    <i data-lucide="scan-eye" style="width: 14px; height: 14px;"></i>
+                    <span id="triggerStatusText">Watching for changes...</span>
+                    <div class="trigger-chips" id="triggerChips"></div>
                 </div>
-                <div class="result-text" id="resultText">
-                    <button class="markdown-toggle-embedded" id="markdownToggle" title="Toggle Markdown Rendering">
-                        <span id="markdownIcon"><i data-lucide="code"></i></span>
-                        <span id="markdownText">Markdown</span>
-                    </button>
-                    <button class="copy-button-embedded" id="copyButton" title="Copy to clipboard">
-                        <i data-lucide="copy"></i>
-                    </button>
-                    <div class="result-text-content" id="resultTextContent"></div>
-                </div>
-                <div id="responsePayloadDebug" class="debug-payload-block" style="display: none; margin-top: 8px;">
-                    <details style="margin: 0;">
-                        <summary style="cursor: pointer; font-size: 12px; color: var(--text-secondary);">Response payload (debug)</summary>
-                        <pre id="responsePayloadContent" style="margin: 8px 0 0; padding: 10px; background: var(--bg-secondary); border-radius: 8px; font-size: 11px; overflow: auto; max-height: 240px; white-space: pre-wrap; word-break: break-all;"></pre>
-                    </details>
+
+                <div class="result-scroll-area" id="resultScrollArea">
+                    <div class="result-prompt" id="currentPrompt"></div>
+                    <div id="requestPayloadDebug" class="debug-payload-block" style="display: none; margin-top: 8px;">
+                        <details style="margin: 0;">
+                            <summary style="cursor: pointer; font-size: 12px; color: var(--text-secondary);">Request payload (debug)</summary>
+                            <pre id="requestPayloadContent" style="margin: 8px 0 0; padding: 10px; background: var(--bg-secondary); border-radius: 8px; font-size: 11px; overflow: auto; max-height: 240px; white-space: pre-wrap; word-break: break-all;"></pre>
+                        </details>
+                    </div>
+                    <div class="result-text" id="resultText">
+                        <button class="markdown-toggle-embedded" id="markdownToggle" title="Toggle Markdown Rendering">
+                            <span id="markdownIcon"><i data-lucide="code"></i></span>
+                            <span id="markdownText">Markdown</span>
+                        </button>
+                        <button class="copy-button-embedded" id="copyButton" title="Copy to clipboard">
+                            <i data-lucide="copy"></i>
+                        </button>
+                        <img id="resultThumbnail" class="result-thumbnail" style="display: none;" alt="Analyzed frame">
+                        <div class="result-text-content" id="resultTextContent"></div>
+                    </div>
+
+                    <!-- VLM Result History Log -->
+                    <div class="vlm-history-section" id="vlmHistoryCard">
+                        <div class="result-header">
+                            <div class="result-header-left">
+                                <div class="result-title">
+                                    <i data-lucide="history"></i> Recent Results
+                                </div>
+                                <div class="result-subtitle" id="historyCount">No results yet</div>
+                            </div>
+                            <button class="history-clear-btn" id="clearHistoryBtn" title="Clear history">
+                                <i data-lucide="trash-2"></i>
+                            </button>
+                        </div>
+                        <div class="vlm-history-list" id="vlmHistoryList"></div>
+                    </div>
+
+                    <div id="responsePayloadDebug" class="debug-payload-block" style="display: none; margin-top: 8px;">
+                        <details style="margin: 0;">
+                            <summary style="cursor: pointer; font-size: 12px; color: var(--text-secondary);">Response payload (debug)</summary>
+                            <pre id="responsePayloadContent" style="margin: 8px 0 0; padding: 10px; background: var(--bg-secondary); border-radius: 8px; font-size: 11px; overflow: auto; max-height: 240px; white-space: pre-wrap; word-break: break-all;"></pre>
+                        </details>
+                    </div>
                 </div>
             </div>
 
@@ -2938,6 +3142,136 @@ After commands, explain: obstacles detected, clearance margins, goal inference, 
                 }
                 document.body.removeChild(textArea);
             }
+        });
+
+        // VLM circular progress ring - estimates % complete from elapsed time vs avg latency
+        // (no true progress signal exists for a single-shot chat completion call)
+        let vlmIsProcessing = false;
+        let vlmProcessingStartTs = 0;
+        const VLM_RING_CIRCUMFERENCE = 100.53; // 2 * PI * r(16)
+
+        function setVlmRing(pct, wrapClass, label) {
+            const wrap = document.getElementById('vlmRingWrap');
+            const fill = document.getElementById('vlmRingFill');
+            const labelEl = document.getElementById('vlmRingLabel');
+            if (!wrap || !fill || !labelEl) return;
+            wrap.className = `vlm-ring-wrap ${wrapClass}`;
+            fill.setAttribute('stroke-dashoffset', String(VLM_RING_CIRCUMFERENCE * (1 - pct / 100)));
+            labelEl.textContent = label;
+        }
+
+        function updateVlmRing(metrics) {
+            const processing = !!metrics.is_processing;
+
+            if (processing && !vlmIsProcessing) {
+                vlmIsProcessing = true;
+                vlmProcessingStartTs = Date.now();
+            } else if (!processing && vlmIsProcessing) {
+                vlmIsProcessing = false;
+                setVlmRing(100, 'idle', 'Done');
+                setTimeout(() => setVlmRing(0, 'idle', 'Idle'), 350);
+                return;
+            }
+
+            if (processing) {
+                const avgMs = metrics.avg_latency_ms;
+                if (avgMs && avgMs > 0) {
+                    const elapsed = Date.now() - vlmProcessingStartTs;
+                    const pct = Math.min(95, (elapsed / avgMs) * 100);
+                    setVlmRing(pct, 'processing', 'Processing');
+                } else {
+                    // No latency history yet (first call) - spin indeterminately
+                    setVlmRing(25, 'processing spin', 'Processing');
+                }
+            }
+        }
+
+        // YOLO trigger status chips - shows currently detected classes,
+        // flashes gold for one message cycle when a class-set change fires the VLM
+        let lastTriggerClasses = null;
+
+        function updateTriggerChips(trigger) {
+            const row = document.getElementById('triggerStatusRow');
+            const chipsEl = document.getElementById('triggerChips');
+            const textEl = document.getElementById('triggerStatusText');
+            if (!row || !chipsEl) return;
+            row.style.display = 'flex';
+
+            const classes = trigger.classes || [];
+            const key = classes.join(',');
+            if (key !== lastTriggerClasses) {
+                lastTriggerClasses = key;
+                if (classes.length === 0) {
+                    chipsEl.innerHTML = '<span class="trigger-chip empty">nothing detected</span>';
+                } else {
+                    chipsEl.innerHTML = classes
+                        .map((c) => `<span class="trigger-chip">${c}</span>`)
+                        .join('');
+                }
+            }
+
+            if (textEl) {
+                textEl.textContent = trigger.just_triggered ? 'Change detected → VLM triggered' : 'Watching for changes...';
+            }
+
+            if (trigger.just_triggered) {
+                chipsEl.classList.add('flash');
+                setTimeout(() => chipsEl.classList.remove('flash'), 600);
+            }
+        }
+
+        // VLM result thumbnail + history log
+        const MAX_HISTORY_ENTRIES = 20;
+
+        function updateResultThumbnail(thumbDataUrl) {
+            const img = document.getElementById('resultThumbnail');
+            if (!img) return;
+            img.src = thumbDataUrl;
+            img.style.display = 'block';
+        }
+
+        function addHistoryEntry(thumbDataUrl, text, tsSeconds) {
+            const list = document.getElementById('vlmHistoryList');
+            if (!list) return;
+
+            const entry = document.createElement('div');
+            entry.className = 'vlm-history-item';
+
+            const thumb = document.createElement('img');
+            thumb.className = 'vlm-history-thumb';
+            thumb.src = thumbDataUrl;
+            thumb.alt = 'Analyzed frame';
+
+            const textEl = document.createElement('div');
+            textEl.className = 'vlm-history-text';
+            textEl.textContent = text;
+            textEl.title = text;
+
+            const tsEl = document.createElement('div');
+            tsEl.className = 'vlm-history-ts';
+            const when = new Date((tsSeconds || Date.now() / 1000) * 1000);
+            tsEl.textContent = when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+            entry.appendChild(thumb);
+            entry.appendChild(textEl);
+            entry.appendChild(tsEl);
+            list.insertBefore(entry, list.firstChild);
+
+            while (list.children.length > MAX_HISTORY_ENTRIES) {
+                list.removeChild(list.lastChild);
+            }
+
+            const countEl = document.getElementById('historyCount');
+            if (countEl) {
+                countEl.textContent = `${list.children.length} result${list.children.length === 1 ? '' : 's'}`;
+            }
+        }
+
+        document.getElementById('clearHistoryBtn')?.addEventListener('click', () => {
+            const list = document.getElementById('vlmHistoryList');
+            if (list) list.innerHTML = '';
+            const countEl = document.getElementById('historyCount');
+            if (countEl) countEl.textContent = 'No results yet';
         });
 
         // Function to update result text (handles both markdown and plain text)
@@ -4061,6 +4395,15 @@ After commands, explain: obstacles detected, clearance margins, goal inference, 
                         latencyValue.textContent = Math.round(data.metrics.last_latency_ms);
                         avgLatencyValue.textContent = Math.round(data.metrics.avg_latency_ms);
                         countValue.textContent = data.metrics.total_inferences;
+
+                        updateVlmRing(data.metrics);
+                        if (data.metrics.trigger) {
+                            updateTriggerChips(data.metrics.trigger);
+                        }
+                        if (data.metrics.result_thumbnail) {
+                            updateResultThumbnail(data.metrics.result_thumbnail);
+                            addHistoryEntry(data.metrics.result_thumbnail, data.text, data.metrics.result_ts);
+                        }
                     }
                     if (data.request_payload) {
                         const block = document.getElementById('requestPayloadDebug');
@@ -4113,6 +4456,10 @@ After commands, explain: obstacles detected, clearance margins, goal inference, 
                     }
                     if (data.process_every != null && !isNaN(data.process_every)) {
                         processEvery.value = String(data.process_every);
+                    }
+                    if (data.trigger_mode) {
+                        const row = document.getElementById('triggerStatusRow');
+                        if (row) row.style.display = data.trigger_mode === 'yolo' ? 'flex' : 'none';
                     }
                     const reqCb = document.getElementById('debugShowRequestPayload');
                     const resCb = document.getElementById('debugShowResponsePayload');

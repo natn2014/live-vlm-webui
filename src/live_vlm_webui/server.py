@@ -22,10 +22,12 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import signal
 import socket
 import subprocess
 import sys
+import time
 import uuid
 from collections import defaultdict
 
@@ -58,6 +60,7 @@ websockets = set()  # Track active WebSocket connections (all)
 gpu_monitor = None  # GPU monitoring instance
 gpu_monitor_task = None  # Background task for GPU monitoring
 rtsp_tracks = {}  # Track active RTSP streams {session_id: (rtsp_track, processor_track)}
+ollama_process = None  # Set only if this server spawned its own 'ollama serve' child
 
 # Multi-session state (0.4.0)
 default_vlm_config = {}  # Set at startup; used to create new sessions
@@ -117,6 +120,75 @@ def get_session_callback(session_id: str):
     return callback
 
 
+def _is_ollama_reachable(host="127.0.0.1", port=11434, timeout=0.5) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _is_vllm_reachable(host="127.0.0.1", port=8000, timeout=0.5) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def ensure_ollama_running(timeout_s: float = 30.0) -> None:
+    """
+    If Ollama isn't already reachable, spawn 'ollama serve' as a child process
+    owned by this server, so it can be cleanly terminated on shutdown (see
+    stop_ollama_if_owned). No-ops if Ollama is already running (e.g. via
+    systemd), the 'ollama' binary isn't installed, or vLLM is already up
+    (vLLM is the preferred local backend - see docs on the GB10 mmproj
+    CPU-offload issue with Ollama).
+    """
+    global ollama_process
+
+    if _is_vllm_reachable():
+        logger.info("vLLM already running on :8000 - preferring it, skipping Ollama startup")
+        return
+
+    if _is_ollama_reachable():
+        logger.info("Ollama already running - using existing instance")
+        return
+
+    if not shutil.which("ollama"):
+        return  # Not installed locally; nothing to start
+
+    logger.info("Starting Ollama server (owned by this process)...")
+    ollama_process = subprocess.Popen(
+        ["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if _is_ollama_reachable():
+            logger.info("Ollama server is ready")
+            return
+        time.sleep(0.5)
+    logger.warning(f"Ollama did not become reachable within {timeout_s}s")
+
+
+def stop_ollama_if_owned() -> None:
+    """Terminate the Ollama process this server spawned, if any. No-ops otherwise."""
+    global ollama_process
+    if ollama_process is None:
+        return
+    logger.info("Stopping Ollama server (spawned by this process)...")
+    ollama_process.terminate()
+    try:
+        ollama_process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        logger.warning("Ollama did not exit gracefully, killing it")
+        ollama_process.kill()
+        ollama_process.wait(timeout=5)
+    ollama_process = None
+    logger.info("Ollama server stopped")
+
+
 def is_port_available(port, host="0.0.0.0"):
     """Check if a port is available for binding"""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -173,8 +245,8 @@ async def detect_local_service_and_model():
     Returns: (api_base, model_name) or (None, None) if no service found
     """
     services = [
-        ("http://localhost:11434/v1", "Ollama"),
         ("http://localhost:8000/v1", "vLLM"),
+        ("http://localhost:11434/v1", "Ollama"),
         ("http://localhost:30000/v1", "SGLang"),
     ]
 
@@ -270,8 +342,8 @@ async def models(request):
 async def detect_services(request):
     """Detect available local VLM services"""
     services = [
-        {"name": "Ollama", "url": "http://localhost:11434/v1", "port": 11434, "path": "/api/tags"},
         {"name": "vLLM", "url": "http://localhost:8000/v1", "port": 8000, "path": "/v1/models"},
+        {"name": "Ollama", "url": "http://localhost:11434/v1", "port": 11434, "path": "/api/tags"},
         {"name": "SGLang", "url": "http://localhost:30000/v1", "port": 30000, "path": "/v1/models"},
     ]
 
@@ -351,6 +423,7 @@ async def websocket_handler(request):
                 "api_base": svc.api_base,
                 "prompt": svc.prompt,
                 "process_every": _VPT.process_every_n_frames,
+                "trigger_mode": _VPT.trigger_mode,
                 "session_id": session_id,
             }
         )
@@ -845,6 +918,28 @@ async def _stop_rtsp_session(session_id: str):
         logger.warning(f"RTSP session {session_id} not found")
 
 
+async def warmup_vlm_service(svc: VLMService):
+    """
+    Send a trivial throwaway request to force the model to load into GPU memory
+    now, instead of paying that cold-start cost on the user's first real trigger.
+    """
+    try:
+        from PIL import Image
+
+        logger.info("Warming up VLM model (loading into GPU memory)...")
+        t0 = time.time()
+        tiny_img = Image.new("RGB", (32, 32), color=(0, 0, 0))
+        await svc.analyze_image(tiny_img, prompt="Reply with OK.")
+        logger.info(f"VLM warm-up complete in {time.time() - t0:.1f}s")
+    except Exception as e:
+        logger.warning(f"VLM warm-up failed (model will load on first real request instead): {e}")
+    finally:
+        # Don't let the throwaway warm-up call skew the latency/count metrics shown in the UI
+        svc.last_inference_time = 0.0
+        svc.total_inferences = 0
+        svc.total_inference_time = 0.0
+
+
 async def on_startup(app):
     """Initialize resources on server startup"""
     global gpu_monitor, gpu_monitor_task
@@ -861,6 +956,11 @@ async def on_startup(app):
     if gpu_monitor:
         gpu_monitor_task = asyncio.create_task(gpu_monitor_loop())
         logger.info("GPU monitoring task started")
+
+    # Warm up the VLM model in the background so it's already resident by the
+    # time a user actually connects and triggers a request
+    if vlm_service is not None:
+        asyncio.create_task(warmup_vlm_service(vlm_service))
 
 
 async def on_shutdown(app):
@@ -899,6 +999,9 @@ async def on_shutdown(app):
     coros = [pc.close() for pc in pcs]
     await asyncio.gather(*coros)
     pcs.clear()
+
+    # Stop Ollama if this server is the one that started it
+    stop_ollama_if_owned()
 
     logger.info("Cleanup complete")
 
@@ -1031,10 +1134,11 @@ def main():
     parser = argparse.ArgumentParser(
         description="WebRTC Live VLM WebUI - Real-time vision model interaction",
         epilog="Examples:\n"
-        "  vLLM:    python server.py --model llama-3.2-11b-vision-instruct --api-base http://localhost:8000/v1\n"
+        "  vLLM (default/preferred): python server.py --model qwen2.5-vl-7b --api-base http://localhost:8000/v1\n"
+        "  vLLM + YOLO trigger:      python server.py --model qwen2.5-vl-7b --api-base http://localhost:8000/v1 --trigger-mode yolo\n"
         "  SGLang:  python server.py --model llama-3.2-11b-vision-instruct --api-base http://localhost:30000/v1\n"
         "  Ollama:  python server.py --model llava:7b --api-base http://localhost:11434/v1\n"
-        "  HTTPS:   python server.py --model llava:7b --api-base http://localhost:11434/v1 --ssl-cert cert.pem --ssl-key key.pem",
+        "  HTTPS:   python server.py --model qwen2.5-vl-7b --api-base http://localhost:8000/v1 --ssl-cert cert.pem --ssl-key key.pem",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
@@ -1071,6 +1175,44 @@ def main():
     default_key_path = str(default_config_dir / "key.pem")
 
     parser.add_argument("--process-every", type=int, default=30, help="Process every Nth frame")
+    parser.add_argument(
+        "--trigger-mode",
+        choices=["interval", "yolo"],
+        default="interval",
+        help=(
+            "How to decide when to send a frame to the VLM: fixed frame interval "
+            "(default) or YOLO11n object-detection based triggering (fires only "
+            "when the set of detected object classes changes)"
+        ),
+    )
+    parser.add_argument(
+        "--yolo-model",
+        default="yolo11n.pt",
+        help="Path or name of YOLO model for --trigger-mode yolo (default: yolo11n.pt, auto-downloaded)",
+    )
+    parser.add_argument(
+        "--yolo-conf",
+        type=float,
+        default=0.4,
+        help="Confidence threshold for YOLO detections (default: 0.4)",
+    )
+    parser.add_argument(
+        "--yolo-classes",
+        default=None,
+        help="Comma-separated COCO class names to trigger on, e.g. 'person,car,dog' (default: any class)",
+    )
+    parser.add_argument(
+        "--yolo-detect-every",
+        type=int,
+        default=5,
+        help="Run YOLO detection every Nth frame in --trigger-mode yolo (default: 5)",
+    )
+    parser.add_argument(
+        "--yolo-cooldown",
+        type=float,
+        default=2.0,
+        help="Minimum seconds between VLM triggers in --trigger-mode yolo (default: 2.0)",
+    )
     parser.add_argument(
         "--ssl-cert",
         default=None,  # Will be set to config dir if not specified
@@ -1112,6 +1254,11 @@ def main():
     if args.ssl_key is None:
         config_dir = get_app_config_dir()
         args.ssl_key = str(config_dir / "key.pem")
+
+    # If no explicit backend was given, make sure a local Ollama is up (starting
+    # it ourselves if needed) before auto-detection tries to find it
+    if not args.api_base:
+        ensure_ollama_running()
 
     # Auto-detect service and model if not specified
     api_base = args.api_base
@@ -1170,6 +1317,29 @@ def main():
     # Update frame processing rate in VideoProcessorTrack if needed
     # (This is a bit hacky but works for this demo)
     VideoProcessorTrack.process_every_n_frames = args.process_every
+    VideoProcessorTrack.trigger_mode = args.trigger_mode
+
+    if args.trigger_mode == "yolo":
+        from .yolo_trigger import YoloTrigger
+
+        allowed_classes = None
+        if args.yolo_classes:
+            allowed_classes = {c.strip() for c in args.yolo_classes.split(",") if c.strip()}
+
+        VideoProcessorTrack.yolo_detector = YoloTrigger(
+            model_path=args.yolo_model,
+            conf=args.yolo_conf,
+            allowed_classes=allowed_classes,
+            cooldown=args.yolo_cooldown,
+        )
+        VideoProcessorTrack.yolo_detect_every_n_frames = args.yolo_detect_every
+
+        logger.info("YOLO trigger mode enabled:")
+        logger.info(f"  Model: {args.yolo_model}")
+        logger.info(f"  Confidence threshold: {args.yolo_conf}")
+        logger.info(f"  Classes filter: {sorted(allowed_classes) if allowed_classes else 'any'}")
+        logger.info(f"  Detect every: {args.yolo_detect_every} frames")
+        logger.info(f"  Trigger cooldown: {args.yolo_cooldown}s")
 
     # Create web application using create_app
     app = asyncio.run(create_app(test_mode=False))

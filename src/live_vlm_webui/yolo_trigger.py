@@ -10,6 +10,7 @@ import logging
 import time
 from typing import Optional
 
+import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,16 @@ class YoloTrigger:
         self.last_classes: frozenset = frozenset()
         self.last_trigger_time: float = 0.0
 
+    @staticmethod
+    def _simplify_polygon(points: np.ndarray, epsilon_frac: float = 0.01) -> list:
+        """Reduce a normalized (x, y) contour to a small set of points for cheap JSON/WS transport."""
+        if points.shape[0] < 3:
+            return np.round(points, 4).tolist()
+        contour = points.reshape(-1, 1, 2).astype(np.float32)
+        peri = cv2.arcLength(contour, True)
+        approx = cv2.approxPolyDP(contour, epsilon_frac * peri, True)
+        return np.round(approx.reshape(-1, 2), 4).tolist()
+
     def detect(self, img_bgr: np.ndarray) -> tuple[bool, frozenset, list[dict]]:
         """
         Run detection on a single BGR frame.
@@ -51,19 +62,30 @@ class YoloTrigger:
             only when the detected class set changed AND the cooldown has elapsed.
             `current_classes` always reflects what was just observed, regardless
             of cooldown, so callers can track scene state accurately.
+            Each entry in `detections` includes a normalized ("box": [x1, y1, x2, y2],
+            0-1 relative to frame size) and, for segmentation models, a simplified
+            "mask" polygon (also normalized) for client-side overlay drawing.
         """
         results = self.model.predict(img_bgr, conf=self.conf, verbose=False, device=self.device)[0]
+        masks_xyn = results.masks.xyn if results.masks is not None else None
 
         detected = set()
         detections = []
-        for box in results.boxes:
+        for i, box in enumerate(results.boxes):
             cls_id = int(box.cls[0])
             name = self.model.names.get(cls_id, str(cls_id))
             if self.allowed_classes and name not in self.allowed_classes:
                 continue
             score = float(box.conf[0])
             detected.add(name)
-            detections.append({"class": name, "conf": score})
+            det = {
+                "class": name,
+                "conf": round(score, 3),
+                "box": np.round(box.xyxyn[0].tolist(), 4).tolist(),
+            }
+            if masks_xyn is not None and i < len(masks_xyn):
+                det["mask"] = self._simplify_polygon(masks_xyn[i])
+            detections.append(det)
 
         current_classes = frozenset(detected)
         changed = current_classes != self.last_classes

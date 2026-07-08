@@ -1081,6 +1081,21 @@ def get_app_config_dir():
     return config_dir
 
 
+def _local_ipv4_addresses() -> list[str]:
+    """Enumerate this machine's non-loopback IPv4 addresses (cross-platform via psutil)."""
+    import psutil
+
+    addrs = set()
+    try:
+        for interfaces in psutil.net_if_addrs().values():
+            for addr in interfaces:
+                if addr.family == socket.AF_INET and addr.address != "127.0.0.1":
+                    addrs.add(addr.address)
+    except Exception as e:
+        logger.warning(f"Could not enumerate local IPs for cert SANs: {e}")
+    return sorted(addrs)
+
+
 def generate_self_signed_cert(cert_path="cert.pem", key_path="key.pem"):
     """Generate a self-signed SSL certificate if it doesn't exist"""
     import subprocess
@@ -1092,6 +1107,12 @@ def generate_self_signed_cert(cert_path="cert.pem", key_path="key.pem"):
     logger.info("🔐 Generating self-signed SSL certificate...")
     logger.info(f"   Saving to: {os.path.dirname(os.path.abspath(cert_path)) or '.'}")
     try:
+        # Include this machine's actual LAN IP(s) as SANs so the cert also works
+        # when accessed via network IP, not just localhost - browsers ignore CN
+        # entirely and require a SAN match.
+        san_entries = ["DNS:localhost", "IP:127.0.0.1"] + [
+            f"IP:{ip}" for ip in _local_ipv4_addresses()
+        ]
         subprocess.run(
             [
                 "openssl",
@@ -1108,11 +1129,13 @@ def generate_self_signed_cert(cert_path="cert.pem", key_path="key.pem"):
                 "365",
                 "-subj",
                 "/CN=localhost",
+                "-addext",
+                f"subjectAltName={','.join(san_entries)}",
             ],
             check=True,
             capture_output=True,
         )
-        logger.info(f"✅ Generated {cert_path} and {key_path}")
+        logger.info(f"✅ Generated {cert_path} and {key_path} (SANs: {', '.join(san_entries)})")
         return True
     except FileNotFoundError:
         logger.warning("⚠️  openssl not found - cannot auto-generate certificates")
@@ -1188,7 +1211,12 @@ def main():
     parser.add_argument(
         "--yolo-model",
         default="yolo11n.pt",
-        help="Path or name of YOLO model for --trigger-mode yolo (default: yolo11n.pt, auto-downloaded)",
+        help=(
+            "Path or name of YOLO model for --trigger-mode yolo (default: yolo11n.pt, "
+            "auto-downloaded). Use a '-seg' model (e.g. yolo11n-seg.pt) to also get "
+            "segmentation masks, which are drawn as an overlay on the video in the UI "
+            "in addition to detection boxes"
+        ),
     )
     parser.add_argument(
         "--yolo-conf",

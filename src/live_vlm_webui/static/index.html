@@ -821,6 +821,18 @@ limitations under the License.
             transform: scaleX(-1);
         }
 
+        /* YOLO detection overlay (boxes + segmentation masks), sits directly on
+           top of the video's rendered content rect */
+        .detection-overlay {
+            position: absolute;
+            pointer-events: none;
+            z-index: 4;
+        }
+
+        .detection-overlay.mirrored {
+            transform: scaleX(-1);
+        }
+
         .video-controls {
             position: absolute;
             top: 12px;
@@ -2590,6 +2602,7 @@ After commands, explain: obstacles detected, clearance margins, goal inference, 
                 </div>
 
                 <video id="videoElement" autoplay playsinline muted></video>
+                <canvas id="detectionOverlay" class="detection-overlay"></canvas>
                 <div class="video-overlay" id="videoOverlay"></div>
             </div>
 
@@ -3218,7 +3231,116 @@ After commands, explain: obstacles detected, clearance margins, goal inference, 
                 chipsEl.classList.add('flash');
                 setTimeout(() => chipsEl.classList.remove('flash'), 600);
             }
+
+            drawDetectionOverlay(trigger.detections || []);
         }
+
+        // --- YOLO detection overlay: draws boxes (and, for -seg models, masks) ---
+        // directly on top of the video's rendered content, accounting for
+        // object-fit: contain letterboxing and the mirror transform.
+        const detectionOverlay = document.getElementById('detectionOverlay');
+        const detectionCtx = detectionOverlay.getContext('2d');
+        let lastDetections = [];
+
+        // Stable per-class color so the same object class always draws the same color
+        function colorForClass(name) {
+            let hash = 0;
+            for (let i = 0; i < name.length; i++) {
+                hash = (hash * 31 + name.charCodeAt(i)) | 0;
+            }
+            const hue = Math.abs(hash) % 360;
+            return `hsl(${hue}, 85%, 55%)`;
+        }
+
+        // Size/position the canvas to exactly cover the video element's box,
+        // then compute the sub-rect actually occupied by video pixels (object-fit: contain).
+        function syncDetectionOverlaySize() {
+            const w = videoElement.offsetWidth;
+            const h = videoElement.offsetHeight;
+            if (detectionOverlay.width !== w || detectionOverlay.height !== h) {
+                detectionOverlay.width = w;
+                detectionOverlay.height = h;
+            }
+            detectionOverlay.style.left = videoElement.offsetLeft + 'px';
+            detectionOverlay.style.top = videoElement.offsetTop + 'px';
+            detectionOverlay.style.width = w + 'px';
+            detectionOverlay.style.height = h + 'px';
+            detectionOverlay.classList.toggle('mirrored', videoElement.classList.contains('mirrored'));
+        }
+
+        function videoContentRect() {
+            const cw = videoElement.offsetWidth;
+            const ch = videoElement.offsetHeight;
+            const vw = videoElement.videoWidth;
+            const vh = videoElement.videoHeight;
+            if (!vw || !vh || !cw || !ch) {
+                return { x: 0, y: 0, w: cw, h: ch };
+            }
+            const videoRatio = vw / vh;
+            const boxRatio = cw / ch;
+            let w, h;
+            if (videoRatio > boxRatio) {
+                w = cw;
+                h = cw / videoRatio;
+            } else {
+                h = ch;
+                w = ch * videoRatio;
+            }
+            return { x: (cw - w) / 2, y: (ch - h) / 2, w, h };
+        }
+
+        function drawDetectionOverlay(detections) {
+            lastDetections = detections;
+            syncDetectionOverlaySize();
+            const rect = videoContentRect();
+            detectionCtx.clearRect(0, 0, detectionOverlay.width, detectionOverlay.height);
+            if (!detections.length) return;
+
+            for (const det of detections) {
+                const color = colorForClass(det.class);
+                const [nx1, ny1, nx2, ny2] = det.box;
+                const x1 = rect.x + nx1 * rect.w;
+                const y1 = rect.y + ny1 * rect.h;
+                const x2 = rect.x + nx2 * rect.w;
+                const y2 = rect.y + ny2 * rect.h;
+
+                // Segmentation mask fill (only present for -seg models)
+                if (det.mask && det.mask.length >= 3) {
+                    detectionCtx.beginPath();
+                    det.mask.forEach(([px, py], idx) => {
+                        const x = rect.x + px * rect.w;
+                        const y = rect.y + py * rect.h;
+                        if (idx === 0) detectionCtx.moveTo(x, y);
+                        else detectionCtx.lineTo(x, y);
+                    });
+                    detectionCtx.closePath();
+                    detectionCtx.fillStyle = color;
+                    detectionCtx.globalAlpha = 0.35;
+                    detectionCtx.fill();
+                    detectionCtx.globalAlpha = 1;
+                }
+
+                // Bounding box
+                detectionCtx.strokeStyle = color;
+                detectionCtx.lineWidth = 2;
+                detectionCtx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+
+                // Label
+                const label = `${det.class} ${Math.round(det.conf * 100)}%`;
+                detectionCtx.font = '600 13px sans-serif';
+                const textWidth = detectionCtx.measureText(label).width;
+                const labelY = y1 > 18 ? y1 : y1 + 18;
+                detectionCtx.fillStyle = color;
+                detectionCtx.fillRect(x1, labelY - 15, textWidth + 8, 18);
+                detectionCtx.fillStyle = '#000';
+                detectionCtx.fillText(label, x1 + 4, labelY - 2);
+            }
+        }
+
+        // Keep the overlay aligned whenever the video's rendered box changes size
+        // (window resize, fullscreen toggle, stream start/stop, aspect-ratio change).
+        new ResizeObserver(() => drawDetectionOverlay(lastDetections)).observe(videoElement);
+        videoElement.addEventListener('loadedmetadata', () => drawDetectionOverlay(lastDetections));
 
         // VLM result thumbnail + history log
         const MAX_HISTORY_ENTRIES = 20;
@@ -3956,6 +4078,7 @@ After commands, explain: obstacles detected, clearance margins, goal inference, 
         mirrorBtn.addEventListener('click', () => {
             videoElement.classList.toggle('mirrored');
             mirrorBtn.classList.toggle('active');
+            drawDetectionOverlay(lastDetections);
         });
 
         // Auto-apply processing interval on change
@@ -4751,6 +4874,7 @@ After commands, explain: obstacles detected, clearance margins, goal inference, 
             }
 
             videoElement.srcObject = null;
+            drawDetectionOverlay([]);
 
             isAnalysisRunning = false;
             updateStatus('Connected', 'connected');

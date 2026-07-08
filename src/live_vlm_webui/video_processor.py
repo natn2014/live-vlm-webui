@@ -68,6 +68,7 @@ class VideoProcessorTrack(VideoStreamTrack):
         self.first_frame_time = None  # Wall clock time of first frame
         self.frame_time_base = None  # Time base for PTS conversion (e.g., 1/90000)
         self._yolo_current_classes = []  # Most recently observed YOLO detection classes
+        self._yolo_detections = []  # Most recently observed YOLO boxes/masks, for overlay drawing
         self._last_seen_response = None  # Tracks response text to detect new VLM results
 
     @staticmethod
@@ -204,10 +205,11 @@ class VideoProcessorTrack(VideoStreamTrack):
                             )
                         else:
                             # Run YOLO off the event loop thread - inference blocks
-                            triggered, classes, _detections = await asyncio.to_thread(
+                            triggered, classes, detections = await asyncio.to_thread(
                                 detector.detect, img
                             )
                             self._yolo_current_classes = sorted(classes)
+                            self._yolo_detections = detections
                             if triggered:
                                 should_send_to_vlm = True
                                 trigger_flash = True
@@ -256,6 +258,7 @@ class VideoProcessorTrack(VideoStreamTrack):
                 metrics["trigger"] = {
                     "mode": "yolo",
                     "classes": self._yolo_current_classes,
+                    "detections": self._yolo_detections,
                     "just_triggered": trigger_flash,
                 }
 

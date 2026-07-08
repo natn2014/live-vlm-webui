@@ -283,7 +283,7 @@ live-vlm-webui --model qwen2.5-vl-7b --api-base http://localhost:8000/v1 \
 | Flag | Default | Description |
 |---|---|---|
 | `--trigger-mode` | `interval` | `interval` (fixed frame count, default) or `yolo` (change-triggered) |
-| `--yolo-model` | `yolo11n.pt` | Path or name of the YOLO model (auto-downloaded by `ultralytics` on first use) |
+| `--yolo-model` | `yolo11n.pt` | Path or name of the YOLO model (auto-downloaded by `ultralytics` on first use). Use a `-seg` variant (e.g. `yolo11n-seg.pt`) to get segmentation masks in addition to boxes |
 | `--yolo-conf` | `0.4` | Confidence threshold for YOLO detections |
 | `--yolo-classes` | *(any)* | Comma-separated COCO class allowlist, e.g. `person,car,dog` |
 | `--yolo-detect-every` | `5` | Run YOLO detection every Nth frame |
@@ -292,6 +292,8 @@ live-vlm-webui --model qwen2.5-vl-7b --api-base http://localhost:8000/v1 \
 **Why this exists:** running the VLM on every frame (or every few seconds regardless of scene content) burns compute re-describing a static scene. YOLO11n is orders of magnitude cheaper than a VLM call, so it can watch continuously and only wake the VLM up when something actually changed.
 
 **GPU contention:** YOLO detection and VLM inference share the same GPU. This fork automatically pauses YOLO detection while a VLM call is in flight, so the two workloads don't fragment/stall each other.
+
+**Live overlay:** in `--trigger-mode yolo`, the UI draws each detection's bounding box on top of the video feed in real time, labeled with class + confidence. If `--yolo-model` is a `-seg` model, the instance segmentation mask is drawn too (a translucent colored fill following the object's outline).
 
 ### UI additions in this mode
 - **VLM processing ring** - circular indicator next to the metrics showing whether the VLM is currently processing (fill estimated from elapsed time vs. average latency)

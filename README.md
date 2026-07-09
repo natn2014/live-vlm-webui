@@ -385,6 +385,14 @@ live-vlm-webui-stop
 
 Both find and gracefully terminate the running server process (falling back to a force-kill if it hasn't exited after a couple seconds) - no need to manually `pkill` or hunt down the PID.
 
+**Freeing VLM backend memory:** stopping the webui does *not* stop your VLM backend (vLLM container, Ollama) - by design, so it stays warm for an instant reconnect next time. On unified-memory systems (e.g. DGX Spark GB10) that backend can hold tens of GB. To also free that memory when you stop:
+
+```bash
+live-vlm-webui-stop --free-memory
+```
+
+This additionally stops any running vLLM Docker container and unloads any Ollama model held in memory. Next time you start the webui, the backend will need to reload (vLLM: ~1-2 min cold start; Ollama: seconds).
+
 > [!NOTE]
 > If you're running the Docker Compose stack instead, stop it with `docker compose down` (or `docker stop live-vlm-webui`) - `live-vlm-webui-stop` only manages locally/pip-run instances.
 
@@ -818,3 +826,10 @@ If you use this in your research or project, please cite:
 [![Star History Chart](https://api.star-history.com/svg?repos=nvidia-ai-iot/live-vlm-webui&type=Date)](https://star-history.com/#nvidia-ai-iot/live-vlm-webui&Date)
 
 > **Haven't starred yet?** [Click here to give us a ⭐](https://github.com/nvidia-ai-iot/live-vlm-webui) — it takes just a second and helps us tremendously!
+## ⭐ RUN Qwen2.5-vl-7b
+cd /home/aath/live_vlm/live-vlm-webui
+source /home/aath/live_vlm/.venv/bin/activate
+live-vlm-webui --api-base http://localhost:8000/v1 --model qwen2.5-vl-7b \
+  --trigger-mode yolo --yolo-model /home/aath/live_vlm/models/yolo11n-seg.pt
+## ⭐ Stop app free memory
+live-vlm-webui-stop --free-memory

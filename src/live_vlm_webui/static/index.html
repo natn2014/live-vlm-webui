@@ -3774,72 +3774,106 @@ After commands, explain: obstacles detected, clearance margins, goal inference, 
             }
         }
 
-        // Fetch Models
+        // Fetch Models - merges model lists across every detected local backend
+        // (vLLM, Ollama, SGLang) into one dropdown, tagging each option with the
+        // api_base it came from so picking a model also switches backends.
+        const KNOWN_LOCAL_API_BASES = new Set([
+            'http://localhost:8000/v1',
+            'http://localhost:11434/v1',
+            'http://localhost:30000/v1',
+        ]);
+
         async function fetchModels() {
             try {
                 modelSelect.innerHTML = '<option value="">Loading models...</option>';
 
-                // Get current API settings from UI
-                const currentApiBase = apiBaseUrl.value.trim();
-                const currentApiKey = apiKey.value.trim();
-
-                // Build query params
-                const params = new URLSearchParams();
-                if (currentApiBase) {
-                    params.append('api_base', currentApiBase);
-                }
-                if (currentApiKey) {
-                    params.append('api_key', currentApiKey);
-                }
-
-                const url = `/models${params.toString() ? '?' + params.toString() : ''}`;
-                const response = await fetch(url);
+                const response = await fetch('/models/all');
                 const data = await response.json();
+                let models = data.models || [];
 
-                if (data.models && data.models.length > 0) {
-                    modelSelect.innerHTML = '';
-                    let currentModel = null;
-                    let autoSelectedModel = null;
+                // If the currently-configured API base isn't one of the auto-probed
+                // local backends (e.g. a custom/remote URL like NVIDIA API Catalog or
+                // OpenAI, possibly requiring an API key), fetch its models too and
+                // fold them into the same merged list.
+                const currentApiBase = apiBaseUrl.value.trim();
+                if (currentApiBase && !KNOWN_LOCAL_API_BASES.has(currentApiBase)) {
+                    try {
+                        const params = new URLSearchParams({ api_base: currentApiBase });
+                        const currentApiKey = apiKey.value.trim();
+                        if (currentApiKey) params.append('api_key', currentApiKey);
+                        const customResponse = await fetch(`/models?${params.toString()}`);
+                        const customData = await customResponse.json();
+                        (customData.models || []).forEach((m) => {
+                            models.push({ id: m.id, backend: 'Custom', api_base: currentApiBase, current: m.current });
+                        });
+                    } catch (e) {
+                        console.warn('Could not fetch models for custom API base:', e);
+                    }
+                }
 
-                    data.models.forEach((model, index) => {
+                if (models.length === 0) {
+                    modelSelect.innerHTML = '<option value="">No models available</option>';
+                    return;
+                }
+
+                modelSelect.innerHTML = '';
+                const byBackend = new Map();
+                models.forEach((m) => {
+                    if (!byBackend.has(m.backend)) byBackend.set(m.backend, []);
+                    byBackend.get(m.backend).push(m);
+                });
+
+                let currentModel = null;
+                byBackend.forEach((backendModels, backendName) => {
+                    const group = document.createElement('optgroup');
+                    group.label = backendName;
+                    backendModels.forEach((model) => {
                         const option = document.createElement('option');
                         option.value = model.id;
                         option.textContent = model.id;
+                        option.dataset.apiBase = model.api_base;
+                        option.dataset.backend = model.backend;
                         if (model.current) {
                             option.selected = true;
-                            currentModel = model.id;
+                            currentModel = model;
                         }
-                        modelSelect.appendChild(option);
+                        group.appendChild(option);
                     });
+                    modelSelect.appendChild(group);
+                });
 
-                    // If no current model, auto-select first model and apply
-                    if (!currentModel && data.models.length > 0) {
-                        autoSelectedModel = data.models[0].id;
-                        modelSelect.value = autoSelectedModel;
-                        currentModel = autoSelectedModel;
-
-                        // Auto-apply the new model
-                        console.log(`Auto-selected model: ${autoSelectedModel}`);
-                        applyApiSettings({ showFeedback: false });
-                    }
-
-                    // Update model name in VLM output header
-                    if (currentModel) {
-                        document.getElementById('modelName').textContent = currentModel;
-                    }
-                } else {
-                    modelSelect.innerHTML = '<option value="">No models available</option>';
+                // If nothing is marked "current" (fresh session), auto-select and
+                // apply the first model so the server actually has a model configured.
+                if (!currentModel) {
+                    currentModel = models[0];
+                    modelSelect.value = currentModel.id;
+                    apiBaseUrl.value = currentModel.api_base;
+                    checkApiKeyRequirement(currentModel.api_base);
+                    updateSystemStatsVisibility(currentModel.api_base);
+                    console.log(`Auto-selected model: ${currentModel.id} (${currentModel.backend})`);
+                    applyApiSettings({ showFeedback: false });
                 }
+
+                document.getElementById('modelName').textContent = currentModel.id;
             } catch (error) {
                 console.error('Error fetching models:', error);
                 modelSelect.innerHTML = '<option value="">Error loading models</option>';
             }
         }
 
-        // Handle model change
+        // Handle model change - each option carries the api_base it belongs to,
+        // so switching models can also switch backends (e.g. vLLM -> Ollama).
         modelSelect.addEventListener('change', (e) => {
             const newModel = e.target.value;
             if (!newModel) return;
+
+            const selectedOption = e.target.selectedOptions[0];
+            const modelApiBase = selectedOption?.dataset.apiBase;
+            if (modelApiBase && modelApiBase !== apiBaseUrl.value.trim()) {
+                apiBaseUrl.value = modelApiBase;
+                checkApiKeyRequirement(modelApiBase);
+                updateSystemStatsVisibility(modelApiBase);
+            }
 
             // Update model name in VLM output header
             document.getElementById('modelName').textContent = newModel;

@@ -339,6 +339,45 @@ async def models(request):
         )
 
 
+async def models_all(request):
+    """
+    Query every known local VLM backend (vLLM, Ollama, SGLang) concurrently and
+    return a single merged model list, each tagged with the api_base it came
+    from. Lets the UI offer one dropdown across backends instead of requiring
+    the user to switch "API Base" first and refresh separately.
+    """
+    from openai import AsyncOpenAI
+
+    local_backends = [
+        {"name": "vLLM", "url": "http://localhost:8000/v1"},
+        {"name": "Ollama", "url": "http://localhost:11434/v1"},
+        {"name": "SGLang", "url": "http://localhost:30000/v1"},
+    ]
+
+    default_svc = get_or_create_session("default")["vlm_service"]
+
+    async def list_backend_models(backend):
+        try:
+            client = AsyncOpenAI(base_url=backend["url"], api_key="EMPTY", timeout=1.5)
+            response = await client.models.list()
+            return [
+                {
+                    "id": m.id,
+                    "backend": backend["name"],
+                    "api_base": backend["url"],
+                    "current": (m.id == default_svc.model and backend["url"] == default_svc.api_base),
+                }
+                for m in response.data
+            ]
+        except Exception:
+            return []
+
+    results = await asyncio.gather(*[list_backend_models(b) for b in local_backends])
+    merged = [model for backend_models in results for model in backend_models]
+
+    return web.Response(content_type="application/json", text=json.dumps({"models": merged}))
+
+
 async def detect_services(request):
     """Detect available local VLM services"""
     services = [
@@ -1020,6 +1059,7 @@ async def create_app(test_mode=False):
     app = web.Application()
     app.router.add_get("/", index)
     app.router.add_get("/models", models)
+    app.router.add_get("/models/all", models_all)
     app.router.add_get("/detect-services", detect_services)
     app.router.add_get("/ws", websocket_handler)
     app.router.add_post("/offer", offer)
@@ -1473,10 +1513,76 @@ def main():
         logger.error(f"Server error: {e}")
 
 
+def _stop_vllm_container():
+    """Stop the local vLLM backend Docker container, if one is running (best-effort)."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "--format", "{{.Names}}\t{{.Image}}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return
+    if result.returncode != 0:
+        return
+    for line in result.stdout.strip().splitlines():
+        parts = line.split("\t")
+        if len(parts) != 2:
+            continue
+        name, image = parts
+        if "vllm" in name.lower() or image.startswith("vllm/"):
+            print(f"  Stopping Docker container: {name} (frees its reserved GPU/RAM)")
+            try:
+                subprocess.run(["docker", "stop", name], capture_output=True, timeout=30)
+            except subprocess.TimeoutExpired:
+                logger.warning(f"Timed out stopping container {name}")
+
+
+def _unload_ollama_models():
+    """Unload any Ollama model currently held in memory (best-effort)."""
+    import subprocess
+
+    try:
+        result = subprocess.run(["ollama", "ps"], capture_output=True, text=True, timeout=5)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return
+    if result.returncode != 0:
+        return
+    lines = result.stdout.strip().splitlines()
+    for line in lines[1:]:  # first line is the header row
+        if not line.strip():
+            continue
+        model_name = line.split()[0]
+        print(f"  Unloading Ollama model: {model_name}")
+        try:
+            subprocess.run(["ollama", "stop", model_name], capture_output=True, timeout=10)
+        except subprocess.TimeoutExpired:
+            logger.warning(f"Timed out unloading Ollama model {model_name}")
+
+
 def stop():
     """Stop the running live-vlm-webui server"""
+    import argparse
     import sys
     import time
+
+    parser = argparse.ArgumentParser(
+        prog="live-vlm-webui-stop", description="Stop the running live-vlm-webui server"
+    )
+    parser.add_argument(
+        "--free-memory",
+        action="store_true",
+        help=(
+            "Also stop the local vLLM Docker container and unload any loaded "
+            "Ollama model. Off by default so the VLM backend stays warm for a "
+            "fast reconnect next time you start the webui - pass this if you "
+            "want that memory back now instead."
+        ),
+    )
+    args = parser.parse_args()
 
     try:
         import psutil
@@ -1508,6 +1614,9 @@ def stop():
 
     if not found:
         print("✓ No running server found")
+        if args.free_memory:
+            _stop_vllm_container()
+            _unload_ollama_models()
         return
 
     # Wait for graceful shutdown
@@ -1541,6 +1650,10 @@ def stop():
         sys.exit(1)
     else:
         print("✓ Server stopped successfully")
+
+    if args.free_memory:
+        _stop_vllm_container()
+        _unload_ollama_models()
 
 
 if __name__ == "__main__":
